@@ -41,11 +41,6 @@ class Sniffing
   end
 end
 
-foo = /(start)(.+?)(end)/ # after seeing an arrow grab arguments until bz%
-bar = /([^,]+)/ # match any character until comma
-
-puts 'ignore', foo
-puts 'sorry', bar
 
 # generate the .jsonl
 class Scaffolding
@@ -62,8 +57,8 @@ class Scaffolding
       {:class => :energy, :children => [:einsteins_me_equivalence]}
     ]
     @STARTING_FUNCTIONS_DATA = [ 
-      {:function => :einsteins_me_equivalence, :arity => 2, :arguments => [:energy, :mass]}.freeze,
-      {:function => :newtons_second, :arity => 2, :arguments => [:mass, :acceleration]}.freeze
+      {:function => :einsteins_me_equivalence, :arity => 2, :arguments => [:energy, :mass], :equation => "work in progress"}.freeze,
+      {:function => :newtons_second, :arity => 2, :arguments => [:mass, :acceleration], :equation => -> (mass, acceleration) {mass * acceleration}}.freeze
     ]
   end
 
@@ -109,8 +104,19 @@ class Appending
     @FUNCTIONS_FILE = 'functions_bz.json'.freeze
     @EXISTING_CLASSES = [:motion, :energy]
     # I'm unsure if > are Regex characters so I escaped them anyways
-    @APPEND_PATTERN = /([a-z]+)-([a-z]+)\|\>([a-z_]+)\|\>give-(\d)\|\>([a-z_]+(?:\s*,\s*[a-z_]+)*)/ # enroll-motion|>vel_time|>give-3|>init_vel, acceleration, speed;
-    @AppendStruct = Struct.new(:creation, :class_name, :fn_name, :arity, :arguments)
+    @APPEND_PATTERN = /([a-z]+)-([a-z]+)\|\>([a-z_]+)\|\>give-(\d)\|\>([a-z_])(\+|\-|\*|\/)([a-z_])\|\>([a-z_]+(?:\s*,\s*[a-z_]+)*)/ # enroll-motion|>vel_time|>give-3|>foo * bar|>init_vel, acceleration, speed;
+    @AppendStruct = Struct.new(:creation, :class_name, :fn_name, :arity, :formula, :arguments) do
+      def match(input)
+        input.match(@APPEND_PATTERN)
+        @AppendStruct.creation = match[1]
+        @AppendStruct.class_name = match[2]
+        @AppendStruct.fn_name = match[3]
+        @AppendStruct.arity = match[4]
+        @AppendStruct.formula = match[5..7]
+        @AppendStruct.arguments = match[7..]
+        # I don't know if it should be self.creation or what
+      end
+    end
     @append_message = '
       ======================================================================
       follow this structure to register a new function:
@@ -145,6 +151,7 @@ class Appending
   end
 
   def normalAppend
+    input = nil
     loop do
       puts @append_message
       input = gets.chomp; break if input == 'abandon'
@@ -153,23 +160,15 @@ class Appending
       if input == 'N' then redo; else break end
     end
 
-    input.match(@APPEND_PATTERN)
-    # I wonder if I could have used a case for this, or atleast something more efficient
-    @AppendStruct.creation = match[1]
-    @AppendStruct.class_name = match[2]
-    @AppendStruct.fn_name = match[3]
-    @AppendStruct.arity = match[4]
-    @AppendStruct.arguments = match[5..]
-    checkAppend([match[1], match[2], match[3], match[4]])
+    give_array = @AppendStruct.match(input)
+    checkAppend(give_array)
 
-    # so the input is supported, time to actually append it to the functions file
-    
-    # come back here; parse the matches, generate an AST, and append it to functions.
     File.open(@FUNCTIONS_FILE, 'a') do
       File.write({
         :fn_name => @AppendStruct.fn_name,
         :arity => @AppendStruct.arity,
-        :arguments => [@AppendStruct.arguments]
+        :arguments => @AppendStruct.arguments.to_a,
+        :equation => @AppendStruct.formula.to_a # we need to update the regex structure
       })
     end
 
@@ -183,12 +182,11 @@ class Appending
       end
     return
     end
+    
     raise 'An unexpected error occured' unless @AppendStruct.creation = 'enroll'
 
     File.open(@MAP_FILE, 'a') do |file|
       File.write(
-        # I'm really not sure how to go about this but I have a solid idea of what I need to do:
-        # I literally just need to call the dictionary and then :children and << appendage
         file[:children] << @AppendStruct.fn_name
       )
     end
@@ -215,44 +213,71 @@ class Parsing
       :FUNCTION_END => /bz%$/,
       :GIVE => /give/,
 
-      :GIVE_BEFORE_DEFINE => /(give?)([a-z_]+)(\.)([a-z_]+)/, # give class.function foo
-      :GIVE_BEFORE_DEFINE_B => /(give?)([a-z_]+)::([a-z_]+)/, # give class::function foo
+      :GIVE_BEFORE_DEFINE => /(give)([a-z_]+)(\.|\:\:)([a-z_]+)([a-z_]+(?:\s*,\s*[a-z_]+)*)/, # give class.function foo, bar OR give class::function foo
 
-      :GIVE_AFTER_DEFINE => /([a-z_]+)(\.)([a-z_]+)(give?)/, # class.function give foo
-      :GIVE_AFTER_DEFINE_B => /([a-z_]+)::([a-z_]+)(give?)/, # class::function give foo
+      :GIVE_AFTER_DEFINE => /([a-z_]+)(\.|\:\:)([a-z_]+)(give)([a-z_]+(?:\s*,\s*[a-z_]+)*)/, # class.function give foo OR class::function give foo, bar
 
-      :TRADITIONAL => /\A([a-z_]+)(\.)([a-z_]+)(\s*->\s*)([a-z_]+(?:\s*,\s*[a-z_]+)*)\z/, # class.function -> foo, bar
+      :TRADITIONAL => /\A([a-z_]+)(\.|\:\:)([a-z_]+)(\s*->\s*)([a-z_]+(?:\s*,\s*[a-z_]+)*)\z/, # class.function -> foo, bar
       :ARGUMENT_SORT_A => [/(->)(.+?)(bz%)/, /([^,]+)/] # class.function -> . . . --first part finds arguments, second filters them.
     }
     @traditional_lines = [] # class.function -> argument, another_argument
     @give_after_lines = [] # class.function give argument
     @give_before_lines = [] # give class.function argument
     @all_arrays = [@traditional_lines, @give_after_lines, @give_before_lines]
+
+    @FUNCTIONS_FILE = 'functions_bz.json'.freeze
   end
 
-
-  # class.function -> argument, another_argument
-  def parseTraditional lines
-    puts 'parse traditional'
-
-    # first we need to find the actual class and then function they are calling.
-    # find the class first to check what functions it owns, then check if the function is in it.
-    lines.each do |line| # simply validating, but at a more precise scale this time
-      line.match(@REGEX_PATTERNS[:TRADITIONAL])
-      # this really shouldn't return nil since we checked it earlier
-      clss_call = match[1]
-      function = match[2]
-      arguments = match[3..] # I don't know if the '..' is necessary
-      # revisit after the datastructure is up
+  # either way (traditional, giveafter, givebefore) all end up here--
+  # because they lose their differences after we extract the arguments
+  def generate(function, arguments)
+    # open up the functions file and check for the formula (using class and function for the search) --then plug in the arguments
+    File.open(@FUNCTIONS_FILE, 'r') do |file|
+      file.each do |hash|
+        if hash[:function] == function && hash[:arguments] == arguments.to_a
+          result = hash[:equation].call(arguments[1], arguments[2])
+          return result
+          # you might ask why Borzoi is so catered towards binary arguments? The answer is I'm not ready to handle all these conditionals
+        else
+          fail 'invalid Borzoi call'
+        end
+      end
     end
   end
 
-  def parseGiveAfter lines
-    puts 'parse give after'
+  # Im starting to think Borzoi isn't that dynamic (as in giving more than one way)
+
+  # class.function -> argument, another_argument
+  def parseTraditional lines
+    lines.each do |line| # simply validating, but at a more precise scale this time
+      line.match(@REGEX_PATTERNS[:TRADITIONAL])
+      function = match[2]
+      arguments = match[3] # I don't know if I need an '..'
+      result = generate(function, arguments)
+      return result
+    end
   end
 
+  # class.function give argument, another_argument
+  def parseGiveAfter lines
+    lines.each do |line|
+      line.match(@REGEX_PATTERNS[:GIVE_AFTER_DEFINE])
+      function = match[3]
+      arguments = match[5]
+      result = generate(function, arguments)
+      return result
+    end
+  end
+
+  # give class.function argument, another argument
   def parseGiveBefore lines
-    puts 'parse give before'
+    lines.each do |line|
+      line.match(@REGEX_PATTERNS[:GIVE_BEFORE_DEFINE])
+      function = match[4]
+      arguments = match[5]
+      result = generate(function, arguments)
+      return result
+    end
   end
 
 
@@ -268,15 +293,14 @@ class Parsing
       end
     end
 
-    
     if @all_arrays.each {|array| array.empty?} then raise 'a critical error occured in the Borzoi Parser' end
     
-    parseTraditional @traditional_lines unless @traditional_lines.empty?
-    parseGiveAfter @give_after_lines    unless @give_after_lines.empty?
-    parseGiveBefore @give_before_lines  unless @give_before_lines.empty?
+    result = parseTraditional @traditional_lines unless @traditional_lines.empty?
+    result = parseGiveAfter @give_after_lines    unless @give_after_lines.empty?
+    result = parseGiveBefore @give_before_lines  unless @give_before_lines.empty?
+    puts result
   end
 end
-
 
 puts 'file for parsing:'
 try_parse = gets.chomp
